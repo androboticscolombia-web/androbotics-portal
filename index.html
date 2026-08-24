@@ -173,6 +173,23 @@
   }
   .dd-btn-secondary{background:var(--white);color:var(--ink-soft);}
   .dd-btn-primary{background:var(--navy);color:#fff;border-color:var(--navy);}
+  .dd-users-list{max-height:280px;overflow-y:auto;margin-top:10px;}
+  .dd-user-row{
+    border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:8px 10px;margin-bottom:8px;font-size:12.5px;
+  }
+  .dd-user-row.inactive{opacity:.55;background:var(--paper);}
+  .dd-user-row-top{display:flex;justify-content:space-between;align-items:center;gap:8px;}
+  .dd-user-name{font-weight:700;color:var(--navy);}
+  .dd-user-meta{color:var(--ink-soft);font-size:11px;margin-top:3px;}
+  .dd-user-toggle{
+    border:1px solid var(--line);border-radius:999px;padding:4px 10px;
+    font-size:11px;font-weight:600;cursor:pointer;font-family:inherit;white-space:nowrap;
+  }
+  .dd-user-toggle.is-active{background:#EAF6EE;color:#227A3E;border-color:#BFE6CA;}
+  .dd-user-toggle.is-inactive{background:#FDF2F1;color:var(--sensorial);border-color:#F6D2CE;}
+  .dd-users-empty{font-size:12.5px;color:var(--ink-soft);text-align:center;padding:14px 0;}
+  .dd-users-note{font-size:11px;color:var(--ink-soft);margin-top:10px;line-height:1.4;}
 
   .content{padding:26px 28px 60px;max-width:1180px;margin:0 auto;}
 
@@ -561,6 +578,7 @@
               </div>
               <button type="button" class="dd-action" id="dd-edit-btn">✏️ Actualizar nombre</button>
               <button type="button" class="dd-action" id="dd-creds-btn">🔒 Cambiar usuario y contraseña</button>
+              <button type="button" class="dd-action" id="dd-users-btn" style="display:none;">👥 Gestionar docentes</button>
               <button type="button" class="dd-action dd-danger" id="dd-logout-btn">↩️ Cerrar sesión</button>
             </div>
 
@@ -593,6 +611,16 @@
               <div class="dd-edit-actions">
                 <button type="button" class="dd-btn-secondary" id="dd-creds-cancel-btn">Cancelar</button>
                 <button type="button" class="dd-btn-primary" id="dd-creds-save-btn">Guardar</button>
+              </div>
+            </div>
+
+            <!-- Vista panel de docentes (solo admin) -->
+            <div id="dd-view-users" style="display:none;">
+              <button type="button" class="dd-btn-secondary" id="dd-create-teachers-btn" style="width:100%;">➕ Crear 10 cuentas de docentes</button>
+              <div id="dd-users-list" class="dd-users-list"></div>
+              <div class="dd-users-note">El acceso se controla dentro de esta plataforma (no elimina la cuenta). Un docente "Inactivo" no podrá entrar aunque tenga la contraseña correcta.</div>
+              <div class="dd-edit-actions">
+                <button type="button" class="dd-btn-secondary" id="dd-users-back-btn" style="flex:none;width:100%;">Volver</button>
               </div>
             </div>
           </div>
@@ -796,8 +824,13 @@
   // ---- Firebase ----
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
   import {
-    getDatabase, ref, get, set, remove
+    getDatabase, ref, get, set, update, remove
   } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+  import {
+    getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+    updateEmail, updatePassword, signOut,
+    EmailAuthProvider, reauthenticateWithCredential
+  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyCTul0lVWJ57N2PIK4RyL4r9klJPxOpxp4",
@@ -811,6 +844,22 @@
 
   const app = initializeApp(firebaseConfig);
   const db = getDatabase(app);
+  const auth = getAuth(app);
+
+  // App secundaria: se usa SOLO para crear cuentas de docentes desde el panel
+  // de admin. Si usáramos "auth" (la principal) para crear cuentas, Firebase
+  // cerraría automáticamente la sesión del admin y lo dejaría logueado como
+  // el nuevo docente. Con una segunda instancia evitamos ese problema.
+  const secondaryApp = initializeApp(firebaseConfig, 'Secondary');
+  const secondaryAuth = getAuth(secondaryApp);
+
+  // Firebase Authentication trabaja con email, pero nuestra UI usa "usuario".
+  // Convertimos el usuario en un email interno único y válido para Firebase.
+  const AUTH_DOMAIN = 'androbotics-portal.app';
+  function usernameToEmail(username){
+    const clean = username.trim().toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    return clean + '@' + AUTH_DOMAIN;
+  }
 
   // Lee el perfil de un usuario en /users/{username}. Devuelve null si no existe.
   async function fetchUserProfile(username){
@@ -829,9 +878,6 @@
   }
 
   // ---- Login ----
-  let VALID_USER = 'admin';
-  let VALID_PASS = 'admin1234';
-
   // Caché local de perfiles ya cargados desde Firebase, para no repetir lecturas.
   const USERS = {};
 
@@ -844,17 +890,30 @@
 
     if(!profile){
       // No existe todavía en la base de datos: creamos uno por defecto y lo guardamos.
+      // Solo el usuario especial "admin" recibe rol de Administrador aquí; cualquier
+      // otra cuenta sin perfil se crea como Docente por precaución (el rol de admin
+      // real se asigna únicamente desde el panel, nunca de forma automática).
+      const isBootstrapAdmin = username === 'admin';
       profile = {
         name: username.charAt(0).toUpperCase() + username.slice(1),
         firstName: username.charAt(0).toUpperCase() + username.slice(1),
-        role: 'Administrador',
-        initials: username.slice(0,2).toUpperCase()
+        role: isBootstrapAdmin ? 'Administrador' : 'Docente',
+        initials: username.slice(0,2).toUpperCase(),
+        active: true,
+        lastLogin: null
       };
       try{
         await saveUserProfile(username, profile);
       }catch(err){
         console.error('No se pudo guardar el perfil nuevo en Firebase:', err);
       }
+    }
+
+    // Acceso revocado por el admin: no dejamos entrar aunque la contraseña sea correcta.
+    if(profile.active === false){
+      const err = new Error('ACCESS_REVOKED');
+      err.code = 'ACCESS_REVOKED';
+      throw err;
     }
 
     USERS[username] = profile;
@@ -870,6 +929,18 @@
     document.getElementById('dd-name').textContent = profile.name;
     document.getElementById('dd-username').textContent = '@' + username;
     document.getElementById('dd-role').textContent = profile.role;
+
+    // Los docentes solo pueden cambiar su nombre; el resto de opciones son solo para admin.
+    const isAdmin = profile.role === 'Administrador';
+    document.getElementById('dd-creds-btn').style.display = isAdmin ? 'block' : 'none';
+    document.getElementById('dd-users-btn').style.display = isAdmin ? 'block' : 'none';
+
+    // Registrar la fecha/hora del login (no bloquea la entrada si falla).
+    const now = Date.now();
+    profile.lastLogin = now;
+    update(ref(db, 'users/' + username), { lastLogin: now }).catch(err=>{
+      console.error('No se pudo registrar el último login:', err);
+    });
   }
 
   let currentUsername = null;
@@ -886,16 +957,52 @@
     e.preventDefault();
     const user = document.getElementById('username').value.trim();
     const pass = document.getElementById('password').value;
+    const email = usernameToEmail(user);
+    loginError.style.display = 'none';
 
-    if(user === VALID_USER && pass === VALID_PASS){
-      await applyUserProfile(user);
-      loginScreen.style.display = 'none';
-      appShell.classList.add('shown');
-    } else {
-      loginError.style.display = 'block';
-      userField.classList.add('error');
-      passField.classList.add('error');
+    try{
+      await signInWithEmailAndPassword(auth, email, pass);
+    }catch(err){
+      // Primer arranque: si aún no existe ninguna cuenta y alguien entra con
+      // el usuario/contraseña por defecto, creamos esa cuenta automáticamente.
+      const noAccountYet = err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential';
+      if(noAccountYet && user === 'admin' && pass === 'admin1234'){
+        try{
+          await createUserWithEmailAndPassword(auth, email, pass);
+        }catch(createErr){
+          console.error('No se pudo crear la cuenta inicial:', createErr);
+          loginError.textContent = 'Usuario o contraseña incorrectos.';
+          loginError.style.display = 'block';
+          userField.classList.add('error');
+          passField.classList.add('error');
+          return;
+        }
+      } else {
+        loginError.textContent = 'Usuario o contraseña incorrectos.';
+        loginError.style.display = 'block';
+        userField.classList.add('error');
+        passField.classList.add('error');
+        return;
+      }
     }
+
+    try{
+      await applyUserProfile(user);
+    }catch(err){
+      if(err.code === 'ACCESS_REVOKED'){
+        await signOut(auth).catch(()=>{});
+        loginError.textContent = 'Tu acceso fue desactivado por el administrador. Contáctalo para más información.';
+        loginError.style.display = 'block';
+        return;
+      }
+      console.error('Error al cargar el perfil:', err);
+      loginError.textContent = 'Usuario o contraseña incorrectos.';
+      loginError.style.display = 'block';
+      return;
+    }
+
+    loginScreen.style.display = 'none';
+    appShell.classList.add('shown');
   });
 
   [document.getElementById('username'), document.getElementById('password')].forEach(inp=>{
@@ -907,6 +1014,7 @@
   });
 
   function doLogout(){
+    signOut(auth).catch(err => console.error('Error al cerrar sesión en Firebase:', err));
     appShell.classList.remove('shown');
     loginScreen.style.display = 'flex';
     loginForm.reset();
@@ -929,12 +1037,14 @@
   const ddViewMenu = document.getElementById('dd-view-menu');
   const ddViewEdit = document.getElementById('dd-view-edit');
   const ddViewCreds = document.getElementById('dd-view-creds');
+  const ddViewUsers = document.getElementById('dd-view-users');
   const ddNameInput = document.getElementById('dd-name-input');
   const ddCredsError = document.getElementById('dd-creds-error');
 
   function openMenuView(){
     ddViewEdit.style.display = 'none';
     ddViewCreds.style.display = 'none';
+    ddViewUsers.style.display = 'none';
     ddViewMenu.style.display = 'block';
   }
 
@@ -1027,10 +1137,6 @@
       showCredsError('Ingresa tu contraseña actual para confirmar los cambios.');
       return;
     }
-    if(currentPassEntered !== VALID_PASS){
-      showCredsError('La contraseña actual es incorrecta.');
-      return;
-    }
     if(!newUser){
       showCredsError('El usuario no puede quedar vacío.');
       return;
@@ -1040,12 +1146,63 @@
       return;
     }
 
-    const finalUser = newUser;
-    const finalPass = newPass ? newPass : VALID_PASS;
+    const user = auth.currentUser;
+    if(!user){
+      showCredsError('Tu sesión expiró. Vuelve a iniciar sesión.');
+      return;
+    }
 
-    // Mover el perfil guardado si cambió el nombre de usuario.
-    if(finalUser !== currentUsername){
-      const oldUsername = currentUsername;
+    // Firebase exige reautenticarse (con la contraseña actual) antes de
+    // permitir cambios sensibles como el email o la contraseña.
+    try{
+      const credential = EmailAuthProvider.credential(user.email, currentPassEntered);
+      await reauthenticateWithCredential(user, credential);
+    }catch(err){
+      if(err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential'){
+        showCredsError('La contraseña actual es incorrecta.');
+      } else {
+        console.error('Error al reautenticar:', err);
+        showCredsError('No se pudo verificar tu contraseña. Intenta de nuevo.');
+      }
+      return;
+    }
+
+    const finalUser = newUser;
+    const oldUsername = currentUsername;
+    const usernameChanged = finalUser !== oldUsername;
+
+    // Cambiar el email (usuario) real en Firebase Auth.
+    if(usernameChanged){
+      try{
+        await updateEmail(user, usernameToEmail(finalUser));
+      }catch(err){
+        if(err.code === 'auth/email-already-in-use'){
+          showCredsError('Ese nombre de usuario ya está en uso.');
+        } else {
+          console.error('No se pudo actualizar el usuario:', err);
+          showCredsError('No se pudo actualizar el usuario. Intenta de nuevo.');
+        }
+        return;
+      }
+    }
+
+    // Cambiar la contraseña real en Firebase Auth.
+    if(newPass){
+      try{
+        await updatePassword(user, newPass);
+      }catch(err){
+        if(err.code === 'auth/weak-password'){
+          showCredsError('La nueva contraseña debe tener al menos 6 caracteres.');
+        } else {
+          console.error('No se pudo actualizar la contraseña:', err);
+          showCredsError('No se pudo actualizar la contraseña. Intenta de nuevo.');
+        }
+        return;
+      }
+    }
+
+    // Mover el perfil guardado en la base de datos si cambió el usuario.
+    if(usernameChanged){
       if(currentProfile){
         USERS[finalUser] = currentProfile;
         delete USERS[oldUsername];
@@ -1063,11 +1220,149 @@
       }
     }
 
-    VALID_USER = finalUser;
-    VALID_PASS = finalPass;
-
     openMenuView();
   });
+
+  // ---- Panel de docentes (solo admin) ----
+  const ddUsersList = document.getElementById('dd-users-list');
+  const ROLE_DOCENTE = 'Docente';
+
+  function formatLastLogin(ts){
+    if(!ts) return 'Nunca ha ingresado';
+    const d = new Date(ts);
+    return 'Último ingreso: ' + d.toLocaleDateString('es-CO', {day:'2-digit', month:'short'}) + ' · ' + d.toLocaleTimeString('es-CO', {hour:'2-digit', minute:'2-digit'});
+  }
+
+  // Trae todos los perfiles con role === 'Docente' desde la base de datos.
+  async function fetchAllTeachers(){
+    const snap = await get(ref(db, 'users'));
+    if(!snap.exists()) return [];
+    const all = snap.val();
+    return Object.keys(all)
+      .filter(username => all[username].role === ROLE_DOCENTE)
+      .map(username => ({ username, ...all[username] }))
+      .sort((a,b) => a.username.localeCompare(b.username));
+  }
+
+  async function renderTeachersPanel(){
+    ddUsersList.innerHTML = '<div class="dd-users-empty">Cargando docentes…</div>';
+    let teachers;
+    try{
+      teachers = await fetchAllTeachers();
+    }catch(err){
+      console.error('No se pudo cargar la lista de docentes:', err);
+      ddUsersList.innerHTML = '<div class="dd-users-empty">No se pudo cargar la lista. Revisa las reglas de la base de datos.</div>';
+      return;
+    }
+
+    if(teachers.length === 0){
+      ddUsersList.innerHTML = '<div class="dd-users-empty">Aún no hay cuentas de docentes creadas.</div>';
+      return;
+    }
+
+    ddUsersList.innerHTML = '';
+    teachers.forEach(t => {
+      const isActive = t.active !== false;
+      const row = document.createElement('div');
+      row.className = 'dd-user-row' + (isActive ? '' : ' inactive');
+      row.innerHTML = `
+        <div class="dd-user-row-top">
+          <div>
+            <div class="dd-user-name">${t.name}</div>
+            <div class="dd-user-meta">@${t.username}</div>
+          </div>
+          <button type="button" class="dd-user-toggle ${isActive ? 'is-active' : 'is-inactive'}" data-username="${t.username}" data-active="${isActive}">
+            ${isActive ? 'Activo' : 'Inactivo'}
+          </button>
+        </div>
+        <div class="dd-user-meta">${formatLastLogin(t.lastLogin)}</div>
+      `;
+      ddUsersList.appendChild(row);
+    });
+  }
+
+  // Activar/desactivar el acceso de un docente.
+  ddUsersList.addEventListener('click', async function(e){
+    const btn = e.target.closest('.dd-user-toggle');
+    if(!btn) return;
+    const username = btn.dataset.username;
+    const isActive = btn.dataset.active === 'true';
+    const newActive = !isActive;
+
+    btn.disabled = true;
+    try{
+      await update(ref(db, 'users/' + username), { active: newActive });
+      if(USERS[username]) USERS[username].active = newActive;
+      await renderTeachersPanel();
+    }catch(err){
+      console.error('No se pudo actualizar el acceso del docente:', err);
+      btn.disabled = false;
+    }
+  });
+
+  function randomPassword(){
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    let out = '';
+    for(let i=0;i<8;i++) out += chars[Math.floor(Math.random()*chars.length)];
+    return out;
+  }
+
+  document.getElementById('dd-create-teachers-btn').addEventListener('click', async function(){
+    const btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Creando cuentas…';
+
+    const created = [];
+    const skipped = [];
+
+    for(let i=1; i<=10; i++){
+      const username = 'docente' + i;
+      const password = randomPassword();
+      const email = usernameToEmail(username);
+      try{
+        await createUserWithEmailAndPassword(secondaryAuth, email, password);
+        await set(ref(db, 'users/' + username), {
+          name: 'Docente ' + i,
+          firstName: 'Docente',
+          role: ROLE_DOCENTE,
+          initials: 'D' + i,
+          active: true,
+          lastLogin: null
+        });
+        created.push({ username, password });
+      }catch(err){
+        if(err.code === 'auth/email-already-in-use'){
+          skipped.push(username);
+        }else{
+          console.error('No se pudo crear ' + username + ':', err);
+          skipped.push(username);
+        }
+      }finally{
+        await signOut(secondaryAuth).catch(()=>{});
+      }
+    }
+
+    btn.disabled = false;
+    btn.textContent = '➕ Crear 10 cuentas de docentes';
+
+    if(created.length){
+      const lines = created.map(c => `${c.username}  →  ${c.password}`).join('\n');
+      alert('Cuentas creadas. Copia y entrega estas contraseñas AHORA — no se podrán ver de nuevo:\n\n' + lines);
+    }
+    if(skipped.length){
+      console.warn('Cuentas que ya existían y no se recrearon:', skipped.join(', '));
+    }
+
+    await renderTeachersPanel();
+  });
+
+  document.getElementById('dd-users-btn').addEventListener('click', function(){
+    ddViewMenu.style.display = 'none';
+    ddViewUsers.style.display = 'block';
+    renderTeachersPanel();
+  });
+
+  document.getElementById('dd-users-back-btn').addEventListener('click', openMenuView);
 
   // ---- Datos de cada kit ----
   const KITS = {
