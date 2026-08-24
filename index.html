@@ -792,24 +792,72 @@
   </div>
   </div><!-- /app-shell -->
 
-<script>
+<script type="module">
+  // ---- Firebase ----
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+  import {
+    getDatabase, ref, get, set, remove
+  } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCTul0lVWJ57N2PIK4RyL4r9klJPxOpxp4",
+    authDomain: "androbotics-portal.firebaseapp.com",
+    databaseURL: "https://androbotics-portal-default-rtdb.firebaseio.com",
+    projectId: "androbotics-portal",
+    storageBucket: "androbotics-portal.firebasestorage.app",
+    messagingSenderId: "831842110391",
+    appId: "1:831842110391:web:a76bdd23f2d78fd1f0b632"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Lee el perfil de un usuario en /users/{username}. Devuelve null si no existe.
+  async function fetchUserProfile(username){
+    const snap = await get(ref(db, 'users/' + username));
+    return snap.exists() ? snap.val() : null;
+  }
+
+  // Guarda (crea o sobrescribe) el perfil de un usuario en la base de datos.
+  async function saveUserProfile(username, profile){
+    await set(ref(db, 'users/' + username), profile);
+  }
+
+  // Elimina el perfil de un usuario (usado al renombrar el usuario).
+  async function deleteUserProfile(username){
+    await remove(ref(db, 'users/' + username));
+  }
+
   // ---- Login ----
   let VALID_USER = 'admin';
   let VALID_PASS = 'admin1234';
 
-  // Datos de perfil por usuario. Si el usuario que ingresa no está aquí,
-  // se usa su nombre de usuario capitalizado como respaldo.
-  const USERS = {
-    admin: { name:'Andrés Domínguez', firstName:'Andrés', role:'Administrador', initials:'AD' }
-  };
+  // Caché local de perfiles ya cargados desde Firebase, para no repetir lecturas.
+  const USERS = {};
 
-  function applyUserProfile(username){
-    const profile = USERS[username] || {
-      name: username.charAt(0).toUpperCase() + username.slice(1),
-      firstName: username.charAt(0).toUpperCase() + username.slice(1),
-      role: 'Administrador',
-      initials: username.slice(0,2).toUpperCase()
-    };
+  async function applyUserProfile(username){
+    let profile = USERS[username];
+
+    if(!profile){
+      profile = await fetchUserProfile(username);
+    }
+
+    if(!profile){
+      // No existe todavía en la base de datos: creamos uno por defecto y lo guardamos.
+      profile = {
+        name: username.charAt(0).toUpperCase() + username.slice(1),
+        firstName: username.charAt(0).toUpperCase() + username.slice(1),
+        role: 'Administrador',
+        initials: username.slice(0,2).toUpperCase()
+      };
+      try{
+        await saveUserProfile(username, profile);
+      }catch(err){
+        console.error('No se pudo guardar el perfil nuevo en Firebase:', err);
+      }
+    }
+
+    USERS[username] = profile;
     currentUsername = username;
     currentProfile = profile;
 
@@ -834,13 +882,13 @@
   const userField = document.getElementById('user-field');
   const passField = document.getElementById('pass-field');
 
-  loginForm.addEventListener('submit', function(e){
+  loginForm.addEventListener('submit', async function(e){
     e.preventDefault();
     const user = document.getElementById('username').value.trim();
     const pass = document.getElementById('password').value;
 
     if(user === VALID_USER && pass === VALID_PASS){
-      applyUserProfile(user);
+      await applyUserProfile(user);
       loginScreen.style.display = 'none';
       appShell.classList.add('shown');
     } else {
@@ -922,7 +970,7 @@
 
   document.getElementById('dd-cancel-btn').addEventListener('click', openMenuView);
 
-  document.getElementById('dd-save-btn').addEventListener('click', function(){
+  document.getElementById('dd-save-btn').addEventListener('click', async function(){
     const newName = ddNameInput.value.trim();
     if(!newName || !currentUsername) { openMenuView(); return; }
 
@@ -939,6 +987,12 @@
     document.getElementById('dd-name').textContent = newName;
 
     openMenuView();
+
+    try{
+      await saveUserProfile(currentUsername, currentProfile);
+    }catch(err){
+      console.error('No se pudo guardar el perfil en Firebase:', err);
+    }
   });
 
   // ---- Cambiar usuario y contraseña ----
@@ -960,7 +1014,7 @@
 
   document.getElementById('dd-creds-cancel-btn').addEventListener('click', openMenuView);
 
-  document.getElementById('dd-creds-save-btn').addEventListener('click', function(){
+  document.getElementById('dd-creds-save-btn').addEventListener('click', async function(){
     ddCredsError.classList.remove('show');
 
     const currentPassEntered = ddCurrentPass.value;
@@ -991,12 +1045,22 @@
 
     // Mover el perfil guardado si cambió el nombre de usuario.
     if(finalUser !== currentUsername){
+      const oldUsername = currentUsername;
       if(currentProfile){
         USERS[finalUser] = currentProfile;
-        delete USERS[currentUsername];
+        delete USERS[oldUsername];
       }
       currentUsername = finalUser;
       document.getElementById('dd-username').textContent = '@' + finalUser;
+
+      if(currentProfile){
+        try{
+          await saveUserProfile(finalUser, currentProfile);
+          await deleteUserProfile(oldUsername);
+        }catch(err){
+          console.error('No se pudo mover el perfil en Firebase:', err);
+        }
+      }
     }
 
     VALID_USER = finalUser;
